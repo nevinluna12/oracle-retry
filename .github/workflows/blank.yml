@@ -1,0 +1,65 @@
+name: Cazar instancia Oracle
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  actions: write
+
+jobs:
+  intentar:
+    runs-on: ubuntu-latest
+    env:
+      USER_OCID:    ${{ secrets.OCI_USER_OCID }}
+      TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+      FINGERPRINT:  ${{ secrets.OCI_FINGERPRINT }}
+      REGION:       ${{ secrets.OCI_REGION }}
+      OCI_KEY:      ${{ secrets.OCI_KEY }}
+      STACK_ID:     ${{ secrets.OCI_STACK_OCID }}
+      GH_TOKEN:     ${{ github.token }}
+    steps:
+      - name: Instalar OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Preparar credenciales
+        run: |
+          mkdir -p ~/.oci
+          printf '%s' "$OCI_KEY" > ~/.oci/api_key.pem
+          chmod 600 ~/.oci/api_key.pem
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s/.oci/api_key.pem\n' \
+            "$USER_OCID" "$FINGERPRINT" "$TENANCY_OCID" "$REGION" "$HOME" > ~/.oci/config
+          chmod 600 ~/.oci/config
+
+      - name: Revisar si ya existe
+        id: revisar
+        run: |
+          ID=$(oci compute instance list \
+                 --compartment-id "$TENANCY_OCID" \
+                 --display-name zeronode \
+                 --lifecycle-state RUNNING \
+                 --query 'data[0].id' --raw-output 2>/dev/null || true)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Intentar crearla
+        if: steps.revisar.outputs.id == ''
+        run: |
+          echo "Todavia no existe. Lanzando apply..."
+          oci resource-manager job create-apply-job \
+            --stack-id "$STACK_ID" \
+            --execution-plan-strategy AUTO_APPROVED \
+            --wait-for-state SUCCEEDED --wait-for-state FAILED \
+            --max-wait-seconds 240 || true
+
+      - name: Avisar y apagarse
+        if: steps.revisar.outputs.id != ''
+        run: |
+          IP=$(oci compute instance list-vnics \
+                 --instance-id "${{ steps.revisar.outputs.id }}" \
+                 --query 'data[0]."public-ip"' --raw-output)
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Instancia creada - IP $IP" \
+            --body "zeronode ya esta corriendo. IP publica: $IP"
+          gh workflow disable "Cazar instancia Oracle" --repo "$GITHUB_REPOSITORY"
